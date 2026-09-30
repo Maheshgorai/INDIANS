@@ -1,12 +1,12 @@
 import React, { useState } from 'react';
 import { Card, Status, useDb } from '../components/ui.jsx';
-import { saveWeek, previewCsv, commitCsv, resetDb, exportJson } from '../services/db.js';
+import { saveWeek, previewCsv, commitCsv, resetDb, exportJson, addPlayer, renamePlayer, setStatus } from '../services/db.js';
 import { weeksDesc, weekRows } from '../services/stats.js';
 import { makeWeekId, weekRange, weekLabel } from '../utils/format.js';
 
 function WeekForm({ initial, onDone }) {
   const db = useDb(), edit = !!initial, latest = weeksDesc(db)[0];
-  const [num, setNum] = useState(initial?.weekNumber ?? latest.weekNumber + 1), [year, setYear] = useState(Number((initial?.id || latest.id).slice(0, 4)));
+  const [num, setNum] = useState(initial?.weekNumber ?? (latest ? latest.weekNumber + 1 : 1)), [year, setYear] = useState(Number((initial?.id || latest?.id || '2026-W01').slice(0, 4)));
   const id = makeWeekId(year, num), auto = weekRange(id);
   const [dates, setDates] = useState(initial ? [initial.startDate, initial.endDate] : null);
   const [start, end] = dates || [auto.startDate, auto.endDate];
@@ -40,30 +40,57 @@ function WeekForm({ initial, onDone }) {
     </Card>);
 }
 function Import() {
-  const [pv, setPv] = useState(null), [msg, setMsg] = useState('');
-  const load = async f => { if (f) { setMsg(''); setPv(previewCsv(await f.text())); } };
-  const good = pv?.rows?.filter(r => !r.issues.length).length || 0;
+  const db = useDb();
+  const [text, setText] = useState(''), [map, setMap] = useState({}), [msg, setMsg] = useState('');
+  const pv = text ? previewCsv(text, map) : null;
+  const good = pv?.rows?.filter(r => !r.issues.length) || [], bad = (pv?.rows?.length || 0) - good.length;
+  const creating = (pv?.newNames || []).filter(n => !map[n]).length, newWeeks = new Set(good.filter(r => r.isNewWeek).map(r => r.weekId));
+  const load = async f => { if (!f) return; setMsg(''); setMap({}); setText(await f.text()); };
+  const pick = (n, v) => setMap(m => ({ ...m, [n]: v || undefined }));
   return (
-    <Card title="Import CSV" sub="Columns: weekId,playerId,playerName,prScore,srScore">
-      <input type="file" accept=".csv,text/csv" onChange={e => load(e.target.files[0])} aria-label="CSV file" style={{ marginTop: 10 }} />
+    <Card title="Import scores (CSV)" sub="Columns: Week, Event (PR or SR), Player, Score. New player names are added automatically.">
+      <input type="file" accept=".csv,text/csv,.txt" onChange={e => { load(e.target.files[0]); e.target.value = ''; }} aria-label="CSV file" style={{ marginTop: 10 }} />
       {pv?.fatal && <div className="err">⚠ {pv.fatal}</div>}
-      {pv?.rows?.length > 0 && <><div className="scroll"><table className="tbl" style={{ marginTop: 10 }}><thead><tr><th>LINE</th><th>WEEK</th><th>PLAYER</th><th>PR</th><th>SR</th><th>STATUS</th></tr></thead><tbody>
-        {pv.rows.map(r => <tr key={r.line}><td>{r.line}</td><td>{r.weekId}{r.isNewWeek && ' (new)'}</td><td>{r.name}</td><td>{r.pr}</td><td>{r.sr}</td><td className={r.issues.length ? 'neg' : 'pos'}>{r.issues.length ? r.issues.join('; ') : 'OK'}</td></tr>)}</tbody></table></div>
-        <div className="row" style={{ marginTop: 10 }}><span className="sub">{good} of {pv.rows.length} rows valid. Invalid rows are skipped; nothing existing is overwritten.</span>
-          <button className="btn" disabled={!good} onClick={() => { setMsg(`Imported ${commitCsv(pv.rows)} rows.`); setPv(null); }}>Confirm import</button></div></>}
-      {msg && <div className="pos" style={{ marginTop: 8 }}>{msg}</div>}
+      {pv?.rows?.length > 0 && <>
+        <div className="note" style={{ marginTop: 10 }}><b>{good.length}</b> rows ready{bad > 0 && <> · <span className="neg"><b>{bad}</b> with problems (skipped)</span></>} · <b>{creating}</b> new player{creating === 1 ? '' : 's'} · <b>{newWeeks.size}</b> new week{newWeeks.size === 1 ? '' : 's'}{[...newWeeks].length > 0 && ` (${[...newWeeks].join(', ')})`}</div>
+        {pv.newNames.length > 0 && <details style={{ marginTop: 10 }} open={db.players.length > 0 && pv.newNames.length <= 10}>
+          <summary style={{ cursor: 'pointer' }}>Check new names ({pv.newNames.length}) — spelled differently? Match to an existing player</summary>
+          {pv.newNames.map(n => <div key={n} className="row" style={{ margin: '6px 0' }}><span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis' }}>{n}{pv.similar[n] && <small className="neg"> ⚠ looks like “{pv.similar[n]}”</small>}</span>
+            <select style={{ maxWidth: 190 }} value={map[n] || ''} onChange={e => pick(n, e.target.value)} aria-label={`Match ${n}`}><option value="">Create new player</option>{db.players.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}</select></div>)}
+        </details>}
+        <div className="scroll" style={{ maxHeight: '45vh', overflow: 'auto', marginTop: 10 }}><table className="tbl"><thead><tr><th>LINE</th><th>WEEK</th><th>EVENT</th><th>PLAYER</th><th>SCORE</th><th>STATUS</th></tr></thead><tbody>
+          {pv.rows.map(r => <tr key={r.line}><td>{r.line}</td><td>{r.weekId || r.rawWeek}</td><td>{r.ev?.toUpperCase() || '?'}</td><td>{r.name}{r.isNewPlayer && !r.issues.length && <span className="pos"> ●new</span>}</td><td>{Number.isFinite(r.score) ? r.score.toLocaleString('en-US') : '?'}</td><td className={r.issues.length ? 'neg' : 'pos'}>{r.issues.length ? r.issues.join('; ') : 'OK'}</td></tr>)}</tbody></table></div>
+        <div className="row" style={{ marginTop: 10 }}><button className="btn g" onClick={() => { setText(''); setMap({}); }}>Cancel</button>
+          <button className="btn" disabled={!good.length} onClick={() => { const r = commitCsv(pv.rows); setMsg(`Imported ${r.rows} scores · ${r.players} new players · ${r.weeks} new weeks.`); setText(''); setMap({}); }}>Confirm import</button></div>
+        <div className="sub" style={{ marginTop: 6 }}>Existing scores are never overwritten. Problem rows are skipped; fix them in your sheet and upload again.</div></>}
+      {msg && <div className="pos" style={{ marginTop: 8 }}>✓ {msg}</div>}
+    </Card>);
+}
+function Players() {
+  const db = useDb(), [name, setName] = useState(''), [err, setErr] = useState('');
+  return (
+    <Card title={`Players (${db.players.length})`} sub="Added automatically from imports. Rename here if someone changes their in-game name; their history stays.">
+      {db.players.length > 0 && <details style={{ marginTop: 10 }}><summary style={{ cursor: 'pointer' }}>Show / rename / set status</summary>
+        <div className="bd">{db.players.map(p => <div key={p.id} className="lr" style={{ gridTemplateColumns: '48px minmax(0,1fr) 96px auto' }}><span className="rk">{p.id}</span><span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{p.name}</span>
+          <select value={p.status} onChange={e => setStatus(p.id, e.target.value)} aria-label={`Status of ${p.name}`}><option>Active</option><option>Inactive</option><option>AV-2</option></select>
+          <button className="btn g" onClick={() => { const n = prompt(`New name for ${p.name}:`, p.name); if (n != null) { const e = renamePlayer(p.id, n); if (e) alert(e); } }}>Rename</button></div>)}</div></details>}
+      <div className="row" style={{ marginTop: 10 }}><input value={name} placeholder="Add a player manually…" aria-label="New player name" onChange={e => setName(e.target.value)} /><button className="btn g" onClick={() => { const e = addPlayer(name); setErr(e); if (!e) setName(''); }}>Add</button></div>
+      {err && <div className="err">⚠ {err}</div>}
     </Card>);
 }
 export default function Admin() {
-  const db = useDb(), [form, setForm] = useState(null);
+  const db = useDb(), [form, setForm] = useState(null), [copied, setCopied] = useState(false);
   if (form) return <WeekForm initial={form === 'new' ? null : form} onDone={() => setForm(null)} />;
-  const dl = () => { const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([exportJson()], { type: 'application/json' })); a.download = 'indians-stats.json'; a.click(); };
+  const dl = () => { const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([exportJson()], { type: 'application/json' })); a.download = 'data.json'; a.click(); };
+  const copy = async () => { try { await navigator.clipboard.writeText(exportJson()); setCopied(true); setTimeout(() => setCopied(false), 2000); } catch { alert('Copy failed — use Download data.json instead.'); } };
   return (<>
-    <Card title="Weeks" right={<button className="btn" onClick={() => setForm('new')}>+ Add New Week</button>}>
-      <div className="bd">{weeksDesc(db).map(w => <div key={w.id} className="lr" style={{ gridTemplateColumns: '1fr auto' }}><span>{weekLabel(w)}<div className="sub">{weekRows(db, 'pr', w.id).length} PR · {weekRows(db, 'sr', w.id).length} SR</div></span><button className="btn g" onClick={() => setForm(w)}>Edit</button></div>)}</div>
-    </Card>
     <Import />
-    <Card title="Backup"><div className="sub">Data is stored in this browser (localStorage). Export a backup regularly.</div>
-      <div className="row" style={{ marginTop: 10 }}><button className="btn g" onClick={dl}>Export JSON</button><button className="btn g" onClick={() => confirm('Reset ALL data to the sample dataset?') && resetDb()}>Reset to sample</button></div></Card>
+    <Card title="Weeks" sub={db.weeks.length ? '' : 'No weeks yet — import a CSV above.'} right={<button className="btn g" onClick={() => setForm('new')}>+ Add manually</button>}>
+      {db.weeks.length > 0 && <div className="bd">{weeksDesc(db).map(w => <div key={w.id} className="lr" style={{ gridTemplateColumns: '1fr auto' }}><span>{weekLabel(w)}<div className="sub">{weekRows(db, 'pr', w.id).length} PR · {weekRows(db, 'sr', w.id).length} SR</div></span><button className="btn g" onClick={() => setForm(w)}>Edit</button></div>)}</div>}
+    </Card>
+    <Players />
+    <Card title="Publish & backup" sub="Your changes are saved in THIS browser only. To show them to everyone on the public site, copy the data into the file public/data.json in your GitHub repo.">
+      <div className="row" style={{ marginTop: 10, flexWrap: 'wrap', justifyContent: 'flex-start' }}><button className="btn" onClick={copy}>{copied ? 'Copied ✓' : 'Copy data JSON'}</button><button className="btn g" onClick={dl}>Download data.json</button>
+        <button className="btn g" onClick={() => { if (confirm('Erase the data saved in this browser? (The published data.json, if any, will load instead.)')) { resetDb(); location.reload(); } }}>Erase local data</button></div></Card>
   </>);
 }

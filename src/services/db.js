@@ -1,8 +1,9 @@
 // Data layer. Everything the UI reads/writes goes through here, so swapping
 // localStorage for Supabase/Firebase/REST later only touches this folder.
 import { seed } from '../data/seed.js';
-import { validWeekId, weekRange } from '../utils/format.js';
-const KEY = 'indians-stats:v1';
+import { validWeekId, weekRange, parseWeek, parseScore } from '../utils/format.js';
+import { parseCsv } from '../utils/csv.js';
+const KEY = 'indians-stats:v3';
 let state = null; const subs = new Set();
 const load = () => {
   if (state) return state;
@@ -12,7 +13,32 @@ const load = () => {
 const commit = () => { state = { ...state }; try { localStorage.setItem(KEY, JSON.stringify(state)); } catch {} subs.forEach(f => f()); };
 export const subscribe = f => (subs.add(f), () => subs.delete(f));
 export const getDb = () => load();
-export const resetDb = () => { state = seed(); commit(); };
+export const resetDb = () => { try { localStorage.removeItem(KEY); } catch {} state = null; };
+/** Call once before first render. If this browser has no saved data, use the published public/data.json (if any). */
+export async function initDb() {
+  try { if (localStorage.getItem(KEY)) return; } catch {}
+  try {
+    const r = await fetch('data.json', { cache: 'no-store' });
+    if (!r.ok) return;
+    const j = await r.json();
+    if (j && Array.isArray(j.players) && Array.isArray(j.weeks) && Array.isArray(j.prScores) && Array.isArray(j.srScores)) state = { ...seed(), ...j };
+  } catch { /* no published data: start from the empty seed */ }
+}
+const clean = s => String(s ?? '').replace(/\s+/g, ' ').trim();
+export function addPlayer(name) {
+  const n = clean(name), db = load();
+  if (!n) return 'Enter a name.';
+  if (db.players.some(p => p.name === n)) return `"${n}" already exists.`;
+  const id = 'p' + String(Math.max(0, ...db.players.map(p => Number(p.id.slice(1)) || 0)) + 1).padStart(3, '0');
+  state = { ...db, players: [...db.players, { id, name: n, status: 'Active' }] }; commit(); return '';
+}
+export function renamePlayer(id, name) {
+  const n = clean(name), db = load();
+  if (!n) return 'Name cannot be empty.';
+  if (db.players.some(p => p.name === n && p.id !== id)) return `"${n}" already exists.`;
+  state = { ...db, players: db.players.map(p => (p.id === id ? { ...p, name: n } : p)) }; commit(); return '';
+}
+export function setStatus(id, status) { const db = load(); state = { ...db, players: db.players.map(p => (p.id === id ? { ...p, status } : p)) }; commit(); }
 export const exportJson = () => JSON.stringify(load(), null, 2);
 const K = { pr: 'prScores', sr: 'srScores' };
 const rerank = (list, wid) => {
@@ -48,39 +74,55 @@ export function saveWeek(w, rows, { edit = false } = {}) {
   state = next; commit(); return [];
 }
 
-/** Parse + validate CSV without saving. Existing data is never overwritten: conflicting rows are flagged. */
-export function previewCsv(text) {
-  const db = load();
-  const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
-  if (!lines.length) return { rows: [], fatal: 'File is empty.' };
-  const head = lines[0].split(',').map(s => s.trim());
-  const need = ['weekId', 'playerId', 'prScore', 'srScore'];
-  const miss = need.filter(h => !head.includes(h));
-  if (miss.length) return { rows: [], fatal: `Missing column(s): ${miss.join(', ')}` };
-  const seen = new Set();
-  const rows = lines.slice(1).map((l, i) => {
-    const c = l.split(',').map(s => s.trim()), o = Object.fromEntries(head.map((h, j) => [h, c[j] ?? '']));
-    const issues = [], key = o.weekId + '|' + o.playerId;
-    if (!validWeekId(o.weekId)) issues.push('Invalid week ID');
-    const p = db.players.find(p => p.id === o.playerId);
-    if (!p) issues.push('Unknown player ID');
-    if (seen.has(key)) issues.push('Duplicate row in file'); seen.add(key);
-    ['prScore', 'srScore'].forEach(f => { const v = num(o[f]); if (v != null && !(v >= 0)) issues.push(`${f} must be ≥ 0`); });
-    [['pr', 'prScore'], ['sr', 'srScore']].forEach(([k, f]) => { if (num(o[f]) != null && db[K[k]].some(r => r.weekId === o.weekId && r.playerId === o.playerId)) issues.push(`${k.toUpperCase()} already exists for this week`); });
-    return { line: i + 2, weekId: o.weekId, playerId: o.playerId, name: p?.name || o.playerName || '?', pr: o.prScore, sr: o.srScore, issues, isNewWeek: validWeekId(o.weekId) && !db.weeks.some(w => w.id === o.weekId) };
+/**
+ * Read a spreadsheet exported as CSV with columns: Week, Event (PR/SR), Player, Score.
+ * Nothing is saved here. Unknown names are flagged as new players; existing scores are never overwritten.
+ * mapping: { "typed name": existingPlayerId } lets the user say "this new name is really that player".
+ */
+export function previewCsv(text, mapping = {}) {
+  const db = load(), all = parseCsv(text);
+  if (!all.length) return { rows: [], fatal: 'File is empty.' };
+  const head = all[0].cells.map(h => h.trim().toLowerCase());
+  const col = (...n) => head.findIndex(h => n.includes(h));
+  const ci = { Week: col('week', 'weekid', 'week id', 'date'), Event: col('event', 'type', 'race'), Player: col('player', 'name', 'playername', 'player name', 'member'), Score: col('score', 'points', 'value') };
+  const miss = Object.entries(ci).filter(([, i]) => i < 0).map(([k]) => k);
+  if (miss.length) return { rows: [], fatal: `Missing column(s): ${miss.join(', ')}. The first row must have the headers: Week, Event, Player, Score.` };
+  const byName = new Map(db.players.map(p => [p.name, p.id])), seen = new Set(), news = new Set();
+  const EV = { PR: 'pr', PIGGY: 'pr', 'PIGGY RACE': 'pr', SR: 'sr', SPACE: 'sr', 'SPACE RACE': 'sr' };
+  const rows = all.slice(1).map(({ line, cells }) => {
+    const rawWeek = clean(cells[ci.Week]), name = clean(cells[ci.Player]), ev = EV[clean(cells[ci.Event]).toUpperCase()], score = parseScore(cells[ci.Score]);
+    const weekId = parseWeek(rawWeek), issues = [];
+    if (!weekId) issues.push('Unrecognised week');
+    if (!ev) issues.push('Event must be PR or SR');
+    if (!name) issues.push('Missing player name');
+    if (score == null || Number.isNaN(score)) issues.push('Score is not a number'); else if (score < 0) issues.push('Score is negative');
+    const playerId = mapping[name] || byName.get(name) || null;
+    if (!issues.length) {
+      const key = [weekId, ev, playerId || name].join('|');
+      if (seen.has(key)) issues.push('Duplicate row in file'); seen.add(key);
+      if (playerId && db[K[ev]].some(r => r.weekId === weekId && r.playerId === playerId)) issues.push(`${ev.toUpperCase()} already saved for this week`);
+    }
+    if (name && !byName.has(name) && !issues.length) news.add(name);
+    return { line, rawWeek, weekId, ev, name, score, playerId, isNewPlayer: !!name && !playerId, isNewWeek: !!weekId && !db.weeks.some(w => w.id === weekId), issues };
   });
-  return { rows };
+  const lower = new Map(db.players.map(p => [p.name.toLowerCase(), p.name]));
+  const similar = Object.fromEntries([...news].filter(n => lower.has(n.toLowerCase())).map(n => [n, lower.get(n.toLowerCase())]));
+  return { rows, newNames: [...news], similar };
 }
+/** Save every valid row. New names become new players automatically. Returns counts. */
 export function commitCsv(rows) {
-  const db = load(), ok = rows.filter(r => !r.issues.length), next = { ...db, weeks: [...db.weeks] };
-  next.prScores = [...db.prScores]; next.srScores = [...db.srScores];
-  const touched = new Set();
+  const db = load(), ok = rows.filter(r => !r.issues.length);
+  const next = { ...db, players: [...db.players], weeks: [...db.weeks], prScores: [...db.prScores], srScores: [...db.srScores] };
+  let n = Math.max(0, ...next.players.map(p => Number(p.id.slice(1)) || 0));
+  const made = new Map(), touched = new Set(), newWeeks = new Set();
   ok.forEach(r => {
-    if (!next.weeks.some(w => w.id === r.weekId)) next.weeks.push({ id: r.weekId, weekNumber: Number(r.weekId.split('-W')[1]), ...weekRange(r.weekId) });
+    let pid = r.playerId;
+    if (!pid && !(pid = made.get(r.name))) { pid = 'p' + String(++n).padStart(3, '0'); made.set(r.name, pid); next.players.push({ id: pid, name: r.name, status: 'Active' }); }
+    if (!next.weeks.some(w => w.id === r.weekId)) { next.weeks.push({ id: r.weekId, weekNumber: Number(r.weekId.split('-W')[1]), ...weekRange(r.weekId) }); newWeeks.add(r.weekId); }
     touched.add(r.weekId);
-    if (num(r.pr) != null) next.prScores.push({ weekId: r.weekId, playerId: r.playerId, score: Number(r.pr), rank: 0 });
-    if (num(r.sr) != null) next.srScores.push({ weekId: r.weekId, playerId: r.playerId, score: Number(r.sr), rank: 0 });
+    next[K[r.ev]].push({ weekId: r.weekId, playerId: pid, score: r.score, rank: 0 });
   });
   touched.forEach(w => { next.prScores = rerank(next.prScores, w); next.srScores = rerank(next.srScores, w); });
-  state = next; commit(); return ok.length;
+  state = next; commit();
+  return { rows: ok.length, players: made.size, weeks: newWeeks.size };
 }

@@ -21,19 +21,22 @@ function Explorer({ go }) {
 }
 export default function Overview({ go }) {
   const db = useDb(), [k, setK] = useState('pr');
-  const latest = weeksDesc(db)[0], asc = weeksAsc(db).slice(-4), active = db.players.filter(p => p.status === 'Active').length;
+  const latest = weeksDesc(db)[0];
+  if (!latest) return (<><Explorer go={go} /><Card title="No weekly data yet" sub="Add your first week to see rankings and trends."><button className="btn" style={{ marginTop: 10 }} onClick={() => go('admin')}>Go to Data</button></Card></>);
+  const asc = weeksAsc(db).slice(-4), active = db.players.filter(p => p.status === 'Active').length;
   const prTop = weekRows(db, 'pr', latest.id)[0], srTop = weekRows(db, 'sr', latest.id)[0], kr = db.kraken.rows[0];
+  const nm = r => (r ? player(db, r.playerId).name : '—');
   const trend = weeklyAvg(db, k).slice(-6);
-  const top = db.players.map(p => ({ playerId: p.id, name: p.name, status: p.status, value: rating(db, p.id).toFixed(2) })).sort((a, b) => b.value - a.value).slice(0, 8).map((r, i) => ({ ...r, rank: i + 1 }));
+  const top = db.players.map(p => ({ playerId: p.id, name: p.name, status: p.status, value: rating(db, p.id).toFixed(2) })).filter(r => Number(r.value) > 0).sort((a, b) => b.value - a.value).slice(0, 8).map((r, i) => ({ ...r, rank: i + 1 }));
   const name = r => player(db, r.playerId).name;
   return (<>
     <Explorer go={go} />
     <Card className="hero"><div className="up" style={{ color: '#7dd3fc' }}>{CLAN} // Command Center</div><h2 style={{ fontSize: 22, marginTop: 4 }}>Clan Intelligence Dashboard</h2><div className="sub">Live view of the current roster, Arena-era trends and event leaders.</div><div style={{ marginTop: 12 }}><span className="bdg"><i className="dot" />DATA ONLINE</span></div></Card>
     <div className="stats" style={{ gridTemplateColumns: 'repeat(2,1fr)' }}>
       <Stat label={`Current ${CLAN} roster`} value={active} sub={`${db.players.length - active} other tracked`} />
-      <Stat label="Piggy record" value={fmtK(prTop.score)} sub={name(prTop)} />
-      <Stat label="Space record" value={fmtSR(srTop.score)} sub={name(srTop)} />
-      <Stat label="Kraken record" value={kr.score.toLocaleString('en-US')} sub={name(kr)} />
+      <Stat label="Piggy record" value={prTop ? fmtK(prTop.score) : '—'} sub={nm(prTop)} />
+      <Stat label="Space record" value={srTop ? fmtSR(srTop.score) : '—'} sub={nm(srTop)} />
+      <Stat label="Kraken record" value={kr ? kr.score.toLocaleString('en-US') : '—'} sub={nm(kr)} />
     </div>
     <Card title="Weekly Performance" sub={`Average per participant · ${latest.id}`} right={<div style={{ width: 130 }}><Tabs items={[['pr', 'PR'], ['sr', 'SR']]} value={k} onChange={setK} /></div>}>
       <Line series={[{ data: trend.map(t => t.value), color: k === 'pr' ? '#f472d0' : '#38d5ff' }]} labels={trend.map(t => 'W' + t.week.weekNumber)} fmtY={v => fmtAxis(k, v)} />

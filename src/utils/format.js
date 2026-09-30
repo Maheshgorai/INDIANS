@@ -22,3 +22,43 @@ export function weekRange(id) {
 export const shortDate = s => new Date(s + 'T00:00:00Z').toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
 export const weekLabel = w => `Week ${w.weekNumber} • ${shortDate(w.startDate)} – ${shortDate(w.endDate)}`;
 export const initials = n => n.replace(/^AV[-.#]/, '').slice(0, 1).toUpperCase();
+
+// ---- Import helpers: turn whatever is typed in a spreadsheet into a week ID / number ----
+const MON = { jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5, jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11 };
+export function isoWeekId(d) {
+  const t = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+  t.setUTCDate(t.getUTCDate() - ((t.getUTCDay() + 6) % 7) + 3); // Thursday of this ISO week
+  const y = t.getUTCFullYear(), jan4 = new Date(Date.UTC(y, 0, 4));
+  const w = 1 + Math.round(((t - jan4) / 864e5 - 3 + ((jan4.getUTCDay() + 6) % 7)) / 7);
+  return makeWeekId(y, w);
+}
+/** Accepts 2026-W38, W38, "Week 38", 18Sep, "18 Sep 2026", Sep 18, 2026-09-18, 18/09/2026. Returns a week ID or null. */
+export function parseWeek(input, now = new Date()) {
+  const s = String(input || '').trim();
+  if (!s) return null;
+  if (validWeekId(s.toUpperCase())) return s.toUpperCase();
+  const today = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+  const mk = (y, m, d, explicitYear) => {
+    if (m == null || m < 0 || m > 11) return null;
+    const pick = yy => { const dt = new Date(Date.UTC(yy, m, d)); return dt.getUTCMonth() === m && dt.getUTCDate() === d ? dt : null; };
+    let dt = pick(y); if (!dt) return null;
+    // Year not typed (e.g. "18Sep"): assume this year, unless that puts it far in the future.
+    if (!explicitYear && dt.getTime() > today + 60 * 864e5) dt = pick(y - 1) || dt;
+    return isoWeekId(dt);
+  };
+  const Y = now.getUTCFullYear(); let m;
+  if ((m = /^(?:week|wk|w)\s*-?\s*(\d{1,2})$/i.exec(s))) { const id = makeWeekId(Y, +m[1]); return validWeekId(id) ? id : null; }
+  if ((m = /^(\d{4})-(\d{1,2})-(\d{1,2})$/.exec(s))) return mk(+m[1], m[2] - 1, +m[3], true);
+  if ((m = /^(\d{1,2})[\/.-](\d{1,2})[\/.-](\d{4})$/.exec(s))) return mk(+m[3], m[2] - 1, +m[1], true);
+  if ((m = /^(\d{1,2})[\s\-\/.]*([A-Za-z]{3,9})[\s\-\/.,]*(\d{4})?$/.exec(s))) return mk(m[3] ? +m[3] : Y, MON[m[2].slice(0, 3).toLowerCase()], +m[1], !!m[3]);
+  if ((m = /^([A-Za-z]{3,9})[\s\-\/.]*(\d{1,2})(?:[\s,\-\/.]+(\d{4}))?$/.exec(s))) return mk(m[3] ? +m[3] : Y, MON[m[1].slice(0, 3).toLowerCase()], +m[2], !!m[3]);
+  return null;
+}
+/** "30,408" -> 30408, "740B" -> 740000000000, "" -> null, junk -> NaN */
+export function parseScore(v) {
+  const s = String(v ?? '').trim().replace(/[,\s_]/g, '');
+  if (s === '') return null;
+  const m = /^(-?\d+(?:\.\d+)?)([KMBT])?$/i.exec(s);
+  if (!m) return NaN;
+  return Math.round(Number(m[1]) * ({ K: 1e3, M: 1e6, B: 1e9, T: 1e12 }[(m[2] || '').toUpperCase()] || 1));
+}

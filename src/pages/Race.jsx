@@ -8,7 +8,8 @@ import { boardRows } from './Overview.jsx';
 const META = { pr: ['Piggy Race', 'Overall, event, recent-form and week comparison views', 'Overall Piggy Performance', 'Average lines across tracked weeks'], sr: ['Space Race', 'Lightyears, event results and recent-form views', 'Overall Space Performance', 'Average lightyears across tracked Space events'] };
 export default function Race({ k, go }) {
   const db = useDb(), ws = weeksDesc(db), [tab, setTab] = useState('overall');
-  const [wk, setWk] = useState(ws[0].id), [wa, setWa] = useState(ws[1]?.id || ws[0].id), [wb, setWb] = useState(ws[0].id);
+  const [wk, setWk] = useState(ws[0]?.id || ''), [wa, setWa] = useState(ws[1]?.id || ws[0]?.id || ''), [wb, setWb] = useState(ws[0]?.id || '');
+  if (!ws.length) return <Card title="No weekly data yet" sub="Import a CSV or add a week on the Data page."><button className="btn" style={{ marginTop: 10 }} onClick={() => go('admin')}>Go to Data</button></Card>;
   const open = id => go('players/' + id), m = META[k];
   const avg = n => boardRows(db, k, averages(db, k, n).map(r => ({ ...r })));
   const cmp = compare(db, k, wa, wb);

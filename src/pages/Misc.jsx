@@ -7,6 +7,7 @@ import { fmt, fmtAxis } from '../utils/format.js';
 export function Kraken({ go }) {
   const db = useDb(), [tab, setTab] = useState('sep'), kr = db.kraken;
   const rows = kr.rows.map((r, i) => ({ rank: i + 1, playerId: r.playerId, name: player(db, r.playerId).name, status: player(db, r.playerId).status, value: r.score.toLocaleString('en-US', { minimumFractionDigits: 1 }) }));
+  if (!kr.rows.length) return <Card title="Kraken" sub="No Kraken data yet." />;
   const avg = kr.rows.reduce((s, r) => s + r.score, 0) / kr.rows.length;
   return (<>
     <Tabs items={[['sep', 'September'], ['l3', 'Last 3'], ['pb', 'PBs']]} value={tab} onChange={setTab} />
@@ -27,12 +28,13 @@ export function Ratings({ go }) {
   return <Card title="Player Ratings" sub="PB score + average score, relative to each week's leader"><Board rows={rows} valueLabel="RATING" onOpen={id => go('players/' + id)} /></Card>;
 }
 export function Trends({ params }) {
-  const db = useDb(), [a, setA] = useState(params.get('p') || db.players[0].id), [b, setB] = useState(db.players[1].id);
+  const db = useDb(), [a, setA] = useState(params.get('p') || db.players[0]?.id || ''), [b, setB] = useState(db.players[1]?.id || db.players[0]?.id || '');
+  if (!db.players.length) return <Card title="No players yet" sub="Import a CSV on the Data page first." />;
   const ws = weeksAsc(db), sel = v => ({ data: ws.map(w => history(db, v.k, v.id).find(x => x.week.id === w.id)?.row.score ?? null) });
   const Pick = ({ v, set }) => <select value={v} onChange={e => set(e.target.value)} aria-label="Player">{db.players.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}</select>;
   return (<>
     <Card title="Compare players"><div className="g2"><Pick v={a} set={setA} /><Pick v={b} set={setB} /></div>
-      <div className="row" style={{ justifyContent: 'flex-start', marginTop: 8 }}><span className="sub" style={{ color: '#4c8dff' }}>● {player(db, a).name}</span><span className="sub" style={{ color: '#f472d0' }}>● {player(db, b).name}</span></div></Card>
+      <div className="row" style={{ justifyContent: 'flex-start', marginTop: 8 }}><span className="sub" style={{ color: '#4c8dff' }}>● {player(db, a)?.name}</span><span className="sub" style={{ color: '#f472d0' }}>● {player(db, b)?.name}</span></div></Card>
     {['pr', 'sr'].map(k => <Card key={k} title={k === 'pr' ? 'Piggy Race' : 'Space Race'} sub="Score by week"><Line labels={ws.map(w => 'W' + w.weekNumber)} fmtY={v => fmtAxis(k, v)} series={[{ ...sel({ k, id: a }), color: '#4c8dff' }, { ...sel({ k, id: b }), color: '#f472d0' }]} /></Card>)}
   </>);
 }
